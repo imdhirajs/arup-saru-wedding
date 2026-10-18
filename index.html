@@ -680,7 +680,7 @@ const Sound = (() => {
   const REC = location.protocol !== 'file:', raw = {}, bufs = {};
   for (const k in FILES) raw[k] = REC ? fetch(DIR + FILES[k]).then(r => r.ok ? r.arrayBuffer() : null).catch(() => null) : Promise.resolve(null);
   const decoded = k => bufs[k] || (bufs[k] = raw[k].then(b => b && new Promise(res => ctx.decodeAudioData(b, res, () => res(null)))));
-  const music = new Audio(); let musicGain, musicBad = !REC;
+  const music = new Audio(); let musicGain, musicBad = !REC, blocked = false;
   if (REC) { music.src = DIR + MUSIC; music.loop = true; music.preload = 'auto'; music.addEventListener('error', () => { musicBad = true; }); }
   // plays a recording; a missing file runs the synth fallback, and one that decodes too late for its moment stays quiet
   function sample(k, v = 1, rate = 1, fallback) {
@@ -760,13 +760,23 @@ const Sound = (() => {
       const t = ctx.currentTime; master.gain.cancelScheduledValues(t); master.gain.setTargetAtTime(.9, t, .5);
       if (musicBad) { raga(); return; }
       musicGain.gain.cancelScheduledValues(t); musicGain.gain.setValueAtTime(0, t); musicGain.gain.setTargetAtTime(MUSIC_VOL, t, 1.2);
-      const p = music.play(); if (p && p.catch) p.catch(() => { musicBad = true; if (on) raga(); });
+      // a phone may refuse until a completed tap; play the synth meanwhile and let unlock() hand over to the track
+      const p = music.play(); if (p && p.catch) p.catch(e => { if (e && e.name === 'NotAllowedError') blocked = true; else musicBad = true; if (on) raga(); });
+    },
+    // phones only let audio start inside a completed tap (touchend/click/keydown), not on the first press; re-arm the track then
+    unlock() {
+      if (!ctx || musicBad || !musicGain) return;
+      if (ctx.state === 'suspended') ctx.resume();
+      if (!music.paused) return;
+      const p = music.play();
+      if (p && p.then) p.then(() => { if (!on) { music.pause(); return; } if (blocked) { blocked = false; clearInterval(timer); } }).catch(() => {});
     },
     stop() { if (!ctx) return; on = false; clearInterval(timer); master.gain.cancelScheduledValues(ctx.currentTime); master.gain.setTargetAtTime(0, ctx.currentTime, .15); setTimeout(() => { if (!on) music.pause(); }, 800); },
     suspend(h) { if (!ctx) return; if (h) { ctx.suspend(); music.pause(); } else if (on) { ctx.resume(); if (!musicBad) music.play().catch(() => {}); } }
   };
 })();
 document.addEventListener('visibilitychange', () => Sound.suspend(document.hidden));
+['touchend', 'click', 'keydown'].forEach(t => document.addEventListener(t, () => Sound.unlock(), { capture: true, passive: true }));
 let soundOn = true;
 const soundBtn = $('#sound');
 function setSound(v) {
